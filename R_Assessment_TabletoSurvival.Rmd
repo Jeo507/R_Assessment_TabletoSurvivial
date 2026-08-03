@@ -1,0 +1,175 @@
+---
+title: "TabletoSurvivalAnalysis"
+authot: "JJI"
+output: html_document
+date: "2026-07-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=T, fig.align = "center", message=F, warning=F, fig.height = 8, cache=T)
+```
+
+```{r}
+
+# Step 1: Load Data 
+
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(tableone)
+library(gtsummary)
+
+setwd("~/Downloads")
+patients <- read.csv("patients.csv")
+head(patients, 4)
+
+```
+
+
+```{r}
+
+# Step2: Set Data 
+
+data <-patients |> 
+  mutate(
+    drug_count =drugA+drugB+drugC, 
+    
+    treatment_type = case_when (
+      drug_count >1 ~ "Combo Therapy", 
+      drug_count == 0 ~ "No Therapy",
+      drugA ==1  ~ "Drug A",
+      drugB ==1  ~ "Drug B", 
+      drugC ==1  ~ "Drug C"
+    ),
+    
+    birth_dt = as.Date(birth_dt),
+    diagnosis_dt = as.Date(diagnosis_dt),
+    
+    Age = as.numeric(floor(interval(birth_dt, diagnosis_dt)/years(1))), 
+    
+    Gender = factor(gender, levels = c("M", "F"), labels =c("Male", "Female"))
+  )
+
+head(data,4)
+str(data)
+
+```
+
+```{r, echo=TRUE}
+
+# Step3: Create a Table 
+
+library(gtsummary)
+
+
+table<-data |> 
+  mutate(treatment_type =factor(treatment_type, 
+                                levels =c ("Drug A", "DrugB", "Drug C", "Combo Therapy", "No Therapy")))|>
+  tbl_summary(
+    by = treatment_type, 
+    include = c(Gender, Age),
+    label = list(Age~"Age at Diagnosis"),
+    type = list(Age ~ "continuous2"),  ## add two rows? 
+    statistic = list(Age ~ c("{median} ({p25}, {p75})", "{mean} ({sd})"))
+  ) |> 
+  bold_labels()|>
+  # This removes the N = XXX from all treatment columns
+  modify_header (
+    all_stat_cols() ~ "**{level}**", # Removes total counts (N=X) and strips out the superscript numbers
+    label~ "**Total Patients**"
+    )|>
+  modify_footnote(everything()~NA) 
+
+table
+```
+```{r, echo =TRUE}
+
+#Step 4: Logistic Regression
+
+Logi<-glm(overall_response ~ Age + treatment_type, data = data, family =binomial)
+summary(Logi)
+
+Logi_summary <-coef(summary(Logi))
+Logi_ci <-confint(Logi)
+
+
+age_response <- data.frame(
+  Var             = rownames(Logi_summary),
+  coefficient     = Logi_summary[, "Estimate"],
+  standard_errors = Logi_summary[, "Std. Error"],
+  odd_ratios      = exp(Logi_summary[, "Estimate"]),
+  odd_ci_lower    = exp(Logi_ci[, 1]), # Column 1 is 2.5% (Lower)
+  odd_ci_upper    = exp(Logi_ci[, 2]), # Column 2 is 97.5% (Upper)
+  p_value         = Logi_summary[, "Pr(>|z|)"]
+)
+
+print(age_response)
+
+```
+```{r, echo =TRUE}
+
+# Step 5: Kaplan-Meier Plot with a Risk Table -- need data cleaning 
+library(survival)
+library(survminer)
+
+## Clean Data: Censor = 0, Event (Death =1)
+
+# 1. Time, Event Vars
+
+data <-data |> 
+  mutate(event = ifelse(is.na(death_dt), 0, 1),
+         
+         death_dt = as.Date(death_dt),
+         last_visit_dt = as.Date(last_visit_dt),
+         
+         time = ifelse(event ==0,as.numeric(last_visit_dt-diagnosis_dt), as.numeric(death_dt-diagnosis_dt)),
+         time_months = time/30.4375,
+         time_years = time/365.25
+         )
+        
+
+# 2. Fit the Kaplan-Meier survival curve for Overall Survival by treatment_type 
+
+km_fit <- survfit(Surv(time_years,event) ~ treatment_type, data=data)
+
+
+# 3. Plot the curve with the risk table
+ggsurvplot(
+  km_fit, 
+  data =data,
+  risk.table =TRUE, 
+  pval = TRUE, 
+  conf.int =FALSE, 
+  xlab = "Time in years",
+  break.time.by=12, 
+  palette = c("#E7B800", "#2E9FDF", "#FC4E07", "#00AFBB", "#868686")
+)
+
+```
+```{r, echo =TRUE}
+
+
+# Step 6: Median Overall Survival Time + 95% CI
+
+km_fit # to see median and 95%CI 
+
+km_fit_loglog <-survfit (
+  Surv(time_years, event) ~ treatment_type, data=data, 
+  conf.type = "log-log"
+)
+
+km_fit_loglog_summary <- summary(km_fit_loglog)$table
+km_fit_loglog_summary
+
+
+table1 <-data.frame(
+  #Var = rownames(km_fit_loglog_summary),
+  Median = km_fit_loglog_summary[, "median"],
+  CL_lower=km_fit_loglog_summary[, "0.95LCL"],
+  CL_upper=km_fit_loglog_summary[,"0.95UCL"]
+)
+
+
+print(table1)
+
+```
